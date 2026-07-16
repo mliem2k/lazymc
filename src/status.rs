@@ -70,8 +70,8 @@ pub async fn serve(
             // Parse handshake
             let handshake = match Handshake::decode(&mut packet.data.as_slice()) {
                 Ok(handshake) => handshake,
-                Err(_) => {
-                    debug!(target: "lazymc", "Got malformed handshake from client, disconnecting");
+                Err(err) => {
+                    debug!(target: "lazymc", "Got malformed handshake from client, disconnecting: {:?}", err);
                     break;
                 }
             };
