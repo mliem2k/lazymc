@@ -164,8 +164,12 @@ impl Server {
             _ => {}
         }
 
-        // If Starting -> Started, update active time and keep it online for configured time
-        if old == State::Starting && new == State::Started {
+        // Entering Started, whether from Starting (lazymc started it) or from Stopped
+        // (passively detected as already running), update active time and keep it
+        // online for the configured time. Without this, a passive Stopped -> Started
+        // detection leaves last_active at its old, possibly very stale, value, making
+        // the server look idle immediately and get stopped right back.
+        if new == State::Started {
             self.update_last_active().await;
             self.keep_online_for(Some(config.time.min_online_time))
                 .await;
@@ -672,4 +676,67 @@ async fn unfreeze_server_signal(config: &Config, server: &Server) -> bool {
         .await;
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use minecraft_protocol::data::server_status::{OnlinePlayers, ServerVersion};
+
+    fn test_config() -> Config {
+        toml::from_str(
+            r#"
+            [server]
+            command = "true"
+            "#,
+        )
+        .unwrap()
+    }
+
+    fn dummy_status() -> ServerStatus {
+        ServerStatus {
+            version: ServerVersion {
+                name: "1.20.4".to_string(),
+                protocol: 765,
+            },
+            players: OnlinePlayers {
+                online: 0,
+                max: 20,
+                sample: vec![],
+            },
+            description: String::new(),
+            favicon: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn detecting_already_started_server_resets_idle_timer() {
+        let server = Server::default();
+        let config = test_config();
+
+        // Simulate a stale last_active far in the past, as could accumulate
+        // over a long-running lazymc process that has seen prior activity.
+        server
+            .last_active
+            .write()
+            .await
+            .replace(Instant::now() - Duration::from_secs(3600));
+
+        assert_eq!(server.state(), State::Stopped);
+
+        // The backend responds even though lazymc never issued a start
+        // command itself (e.g. detected via the passive background
+        // monitor finding an externally-started server).
+        server.update_status(&config, Some(dummy_status())).await;
+
+        assert_eq!(server.state(), State::Started);
+
+        // A server that was just detected as started must not be
+        // immediately considered idle, regardless of how stale
+        // last_active was before this detection.
+        assert!(
+            !server.should_sleep(&config).await,
+            "server should not be considered idle immediately after being detected as started"
+        );
+    }
 }
